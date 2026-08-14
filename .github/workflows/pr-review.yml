@@ -1,2 +1,19 @@
-- name: pull-request-review
-  uses: ai-action/pull-request-review@v2.0.0
+name: Pull Request Review
+
+on:
+  pull_request:
+
+jobs:
+  pull-request-review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pull Request Review
+        uses: ai-action/pull-request-review@v2.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          model: codellama
+          prompt: Code review the diff:
+          comment-header: "# Pull Request Review"
+          token: ${{ github.token }}
