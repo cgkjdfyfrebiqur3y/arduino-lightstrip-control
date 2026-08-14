@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - "**"
+    paths-ignore:
+      - "CHANGELOG.md"
+      - ".github/changelog-pending.md"
+
   pull_request:
     types:
       - opened
@@ -19,9 +23,8 @@ jobs:
   changelog:
     runs-on: ubuntu-latest
 
-    # Don't run twice for the same PR branch when the PR event
-    # and push event happen together.
-    if: github.event_name != 'pull_request' || github.event.action == 'closed'
+    # Only generate from pushes and PR closure.
+    if: github.event_name == 'push' || github.event.action == 'closed'
 
     steps:
       - name: Checkout repository
@@ -29,16 +32,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate changelog
+      - name: Process changelog
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
 
-          mkdir -p .github
-
           DATE="$(date -u '+%Y-%m-%d')"
           SHA="${GITHUB_SHA:0:7}"
+
+          SUBJECT="$(git log -1 --pretty=%s "$GITHUB_SHA")"
+          BODY="$(git log -1 --pretty=%b "$GITHUB_SHA")"
+          AUTHOR="$(git log -1 --pretty=%an "$GITHUB_SHA")"
+
+          MESSAGE="${SUBJECT}
+          ${BODY}"
+
+          echo "Commit: $SUBJECT"
+
+          # --------------------------------------------------
+          # NO-UPDATE
+          # --------------------------------------------------
+
+          if printf '%s\n' "$MESSAGE" | grep -q 'NO-UPDATE'; then
+            echo "NO-UPDATE found. Nothing will be added."
+            exit 0
+          fi
+
+          # --------------------------------------------------
+          # Prepare files
+          # --------------------------------------------------
+
+          touch .github/changelog-pending.md
 
           if [ ! -f CHANGELOG.md ]; then
             cat > CHANGELOG.md <<'EOF'
@@ -49,23 +74,61 @@ jobs:
           EOF
           fi
 
-          # Avoid adding the same commit twice.
-          if grep -q "commit ${SHA}" CHANGELOG.md; then
-            echo "Commit ${SHA} is already in the changelog."
+          # Don't process the same commit twice.
+          if grep -q "commit ${SHA}" CHANGELOG.md ||
+             grep -q "commit ${SHA}" .github/changelog-pending.md; then
+            echo "Commit ${SHA} has already been processed."
             exit 0
           fi
 
-          SUBJECT="$(git log -1 --pretty=%s "$GITHUB_SHA")"
-          AUTHOR="$(git log -1 --pretty=%an "$GITHUB_SHA")"
+          ENTRY="- ${SUBJECT} — ${AUTHOR} (commit ${SHA})"
+
+          # --------------------------------------------------
+          # UPDATE-SUPRESS
+          # --------------------------------------------------
+
+          if printf '%s\n' "$MESSAGE" | grep -q 'UPDATE-SUPRESS'; then
+            echo "UPDATE-SUPRESS found."
+            echo "Storing update for the next non-suppressed commit."
+
+            {
+              echo "$ENTRY"
+            } >> .github/changelog-pending.md
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add .github/changelog-pending.md
+
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: store pending changelog update"
+              git push
+            fi
+
+            exit 0
+          fi
+
+          # --------------------------------------------------
+          # NORMAL UPDATE
+          # --------------------------------------------------
+
+          echo "Normal commit. Updating changelog."
 
           {
             echo "## ${DATE}"
             echo
-            echo "- ${SUBJECT} — ${AUTHOR} (commit ${SHA})"
+            echo "$ENTRY"
+
+            # Flush suppressed updates.
+            if [ -s .github/changelog-pending.md ]; then
+              echo
+              echo "### Previous suppressed updates"
+              cat .github/changelog-pending.md
+            fi
+
             echo
           } > /tmp/changelog-entry
 
-          # Insert the newest entry after the header.
           {
             head -n 4 CHANGELOG.md
             cat /tmp/changelog-entry
@@ -74,12 +137,17 @@ jobs:
 
           mv /tmp/CHANGELOG.md CHANGELOG.md
 
-      - name: Commit changelog
-        run: |
+          # Clear pending updates after flushing them.
+          : > .github/changelog-pending.md
+
+          # --------------------------------------------------
+          # Commit changes
+          # --------------------------------------------------
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add CHANGELOG.md
+          git add CHANGELOG.md .github/changelog-pending.md
 
           if git diff --cached --quiet; then
             echo "No changelog changes."
