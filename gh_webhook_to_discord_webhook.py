@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import hashlib
+import hmac
 import json
 import os
 import urllib.request
@@ -9,7 +11,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HOST = "0.0.0.0"
 PORT = 8080
 
-DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1537837094599397466/BDuNydXnFTOEj3h0buEu4o0zmtAvcciH8OnnRJG4TTElcNInnCNSfhI7Mtk13CyGhbyF"
+GITHUB_SECRET = os.environ["gh_webhook_secret"]
+DISCORD_WEBHOOK = os.environ["webhook_discord"]
+
+
+def verify_github_signature(body, signature):
+    if not signature:
+        return False
+
+    expected = "sha256=" + hmac.new(
+        GITHUB_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    return hmac.compare_digest(expected, signature)
 
 
 def send_discord(message):
@@ -22,9 +38,9 @@ def send_discord(message):
         data=data,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "GitHub-Webhook-Server"
+            "User-Agent": "GitHub-Webhook-Server",
         },
-        method="POST"
+        method="POST",
     )
 
     with urllib.request.urlopen(request, timeout=10) as response:
@@ -32,47 +48,42 @@ def send_discord(message):
 
 
 def describe_event(event, data):
-    # ---------------------------------------------------------
-    # PUSH
-    # ---------------------------------------------------------
+    repository = data.get("repository", {}).get(
+        "full_name",
+        "unknown repository"
+    )
 
+    # Push
     if event == "push":
-        repository = data["repository"]["full_name"]
-        sender = data["sender"]["login"]
-        branch = data["ref"].removeprefix("refs/heads/")
-
+        sender = data.get("sender", {}).get("login", "unknown")
+        branch = data.get("ref", "").removeprefix("refs/heads/")
         commits = data.get("commits", [])
 
         lines = [
             f"{sender} pushed {len(commits)} commit(s) to {repository}.",
             f"Branch: {branch}",
-            ""
         ]
 
         for commit in commits:
-            message = commit["message"].split("\n", 1)[0]
-            sha = commit["id"][:7]
+            sha = commit.get("id", "")[:7]
+            message = commit.get("message", "").split("\n", 1)[0]
 
             lines.append(f"{sha} {message}")
 
         return "\n".join(lines)
 
-    # ---------------------------------------------------------
-    # PULL REQUEST
-    # ---------------------------------------------------------
-
+    # Pull request
     if event == "pull_request":
-        action = data["action"]
+        action = data.get("action", "changed")
         pr = data["pull_request"]
 
         number = data["number"]
-        title = pr["title"]
-        user = pr["user"]["login"]
-
+        title = pr.get("title", "(no title)")
+        user = pr.get("user", {}).get("login", "unknown")
         description = pr.get("body") or "(no description)"
 
-        head = pr["head"]["ref"]
-        base = pr["base"]["ref"]
+        head = pr.get("head", {}).get("ref", "unknown")
+        base = pr.get("base", {}).get("ref", "unknown")
 
         return (
             f"Pull request #{number} was {action} by {user}.\n\n"
@@ -81,18 +92,14 @@ def describe_event(event, data):
             f"Branch: {head} -> {base}"
         )
 
-    # ---------------------------------------------------------
-    # ISSUES
-    # ---------------------------------------------------------
-
+    # Issue
     if event == "issues":
-        action = data["action"]
+        action = data.get("action", "changed")
         issue = data["issue"]
 
         number = issue["number"]
-        title = issue["title"]
-        user = issue["user"]["login"]
-
+        title = issue.get("title", "(no title)")
+        user = issue.get("user", {}).get("login", "unknown")
         description = issue.get("body") or "(no description)"
 
         return (
@@ -101,18 +108,14 @@ def describe_event(event, data):
             f"Description:\n{description}"
         )
 
-    # ---------------------------------------------------------
-    # RELEASE
-    # ---------------------------------------------------------
-
+    # Release
     if event == "release":
-        action = data["action"]
+        action = data.get("action", "changed")
         release = data["release"]
 
-        tag = release["tag_name"]
+        tag = release.get("tag_name", "unknown")
         name = release.get("name") or tag
-        user = release["author"]["login"]
-
+        user = release.get("author", {}).get("login", "unknown")
         description = release.get("body") or "(no description)"
 
         return (
@@ -121,33 +124,54 @@ def describe_event(event, data):
             f"Description:\n{description}"
         )
 
-    # ---------------------------------------------------------
-    # UNKNOWN EVENT
-    # ---------------------------------------------------------
+    # Generic fallback for other GitHub events
+    action = data.get("action")
 
-    return (
-        f"GitHub event: {event}\n"
-        f"Repository: {data.get('repository', {}).get('full_name', 'unknown')}\n"
-        f"Action: {data.get('action', 'unknown')}"
-    )
+    if action:
+        return (
+            f"GitHub event '{event}' happened in {repository}.\n"
+            f"Action: {action}"
+        )
+
+    return f"GitHub event '{event}' happened in {repository}."
 
 
 class GitHubWebhookHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length)
+            content_length = int(
+                self.headers.get("Content-Length", "0")
+            )
 
-            data = json.loads(raw.decode("utf-8"))
+            body = self.rfile.read(content_length)
 
-            event = self.headers.get("X-GitHub-Event", "unknown")
+            # Verify GitHub's X-Hub-Signature-256.
+            signature = self.headers.get(
+                "X-Hub-Signature-256"
+            )
+
+            if not verify_github_signature(body, signature):
+                self.send_response(401)
+                self.send_header(
+                    "Content-Type",
+                    "text/plain; charset=utf-8"
+                )
+                self.end_headers()
+                self.wfile.write(b"Invalid GitHub signature\n")
+                return
+
+            # Only parse the request after authentication.
+            data = json.loads(body.decode("utf-8"))
+
+            event = self.headers.get(
+                "X-GitHub-Event",
+                "unknown"
+            )
 
             message = describe_event(event, data)
 
-            print()
             print(message)
-            print()
 
             send_discord(message)
 
@@ -166,8 +190,24 @@ class GitHubWebhookHandler(BaseHTTPRequestHandler):
 
             self.wfile.write(response)
 
-        except Exception as e:
-            print(f"Webhook error: {e}")
+        except json.JSONDecodeError:
+            response = b"Invalid JSON\n"
+
+            self.send_response(400)
+            self.send_header(
+                "Content-Type",
+                "text/plain; charset=utf-8"
+            )
+            self.send_header(
+                "Content-Length",
+                str(len(response))
+            )
+            self.end_headers()
+
+            self.wfile.write(response)
+
+        except Exception as error:
+            print(f"Webhook error: {error}")
 
             response = b"Internal Server Error\n"
 
@@ -185,7 +225,7 @@ class GitHubWebhookHandler(BaseHTTPRequestHandler):
             self.wfile.write(response)
 
     def do_GET(self):
-        response = b"GitHub webhook server\n"
+        response = b"GitHub webhook server is running\n"
 
         self.send_response(200)
         self.send_header(
@@ -201,6 +241,7 @@ class GitHubWebhookHandler(BaseHTTPRequestHandler):
         self.wfile.write(response)
 
     def log_message(self, format, *args):
+        # Don't print the default HTTP access log.
         pass
 
 
@@ -210,12 +251,12 @@ def main():
         GitHubWebhookHandler
     )
 
-    print(f"Listening on {HOST}:{PORT}")
+    print(f"GitHub webhook server listening on {HOST}:{PORT}")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        print("\nStopping server...")
     finally:
         server.server_close()
 
