@@ -1,2 +1,26 @@
-- name: pull-request-review
-  uses: ai-action/pull-request-review@v2.0.0
+name: Pull Request Review
+
+on:
+  pull_request:
+
+jobs:
+  pull-request-review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pull Request Review
+        # You may pin to the exact commit or the version.
+        # uses: ai-action/pull-request-review@4d75bf715c798ae7b644c030742ec197abb755b1
+        uses: ai-action/pull-request-review@v2.0.0
+        with:
+          # Language model name
+          model: # optional, default is codellama
+
+          # Input prompt before the PR diff
+          prompt: # optional, default is Code review the diff:
+
+          # Comment title in Markdown
+          comment-header: # optional, default is # Pull Request Review
+
+          # GitHub token
+          token: # optional, default is ${{ github.token }}
