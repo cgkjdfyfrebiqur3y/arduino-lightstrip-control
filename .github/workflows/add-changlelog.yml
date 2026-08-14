@@ -1,0 +1,90 @@
+name: Generate Changelog
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+
+    # Don't run twice for the same PR branch when the PR event
+    # and push event happen together.
+    if: github.event_name != 'pull_request' || github.event.action == 'closed'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          mkdir -p .github
+
+          DATE="$(date -u '+%Y-%m-%d')"
+          SHA="${GITHUB_SHA:0:7}"
+
+          if [ ! -f CHANGELOG.md ]; then
+            cat > CHANGELOG.md <<'EOF'
+          # Changelog
+
+          All notable changes to this project are documented here.
+
+          EOF
+          fi
+
+          # Avoid adding the same commit twice.
+          if grep -q "commit ${SHA}" CHANGELOG.md; then
+            echo "Commit ${SHA} is already in the changelog."
+            exit 0
+          fi
+
+          SUBJECT="$(git log -1 --pretty=%s "$GITHUB_SHA")"
+          AUTHOR="$(git log -1 --pretty=%an "$GITHUB_SHA")"
+
+          {
+            echo "## ${DATE}"
+            echo
+            echo "- ${SUBJECT} — ${AUTHOR} (commit ${SHA})"
+            echo
+          } > /tmp/changelog-entry
+
+          # Insert the newest entry after the header.
+          {
+            head -n 4 CHANGELOG.md
+            cat /tmp/changelog-entry
+            tail -n +5 CHANGELOG.md
+          } > /tmp/CHANGELOG.md
+
+          mv /tmp/CHANGELOG.md CHANGELOG.md
+
+      - name: Commit changelog
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add CHANGELOG.md
+
+          if git diff --cached --quiet; then
+            echo "No changelog changes."
+            exit 0
+          fi
+
+          git commit -m "docs: update changelog"
+          git push
